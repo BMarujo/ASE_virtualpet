@@ -1,0 +1,87 @@
+Executing action: flash
+Serial port /dev/ttyUSB0
+Connecting....
+Detecting chip type... ESP32-C6
+Running ninja in directory /home/marujo/MECT/ASE/pratica/project/virtual-pet/build
+Executing "ninja flash"...
+[1/5] cd /home/marujo/MECT/ASE/pratica/project/virtual-pet/build/esp-idf/esptool_py && /home/marujo/.espressif/python_env/idf5.5_py3.14_env/bin/python /home/marujo/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /home/marujo/MECT/ASE/pratica/project/virtual-pet/build/partition_table/partition-table.bin /home/marujo/MECT/ASE/pratica/project/virtual-pet/build/virtual-pet.bin
+virtual-pet.bin binary size 0xffed0 bytes. Smallest app partition is 0x100000 bytes. 0x130 bytes (0%) free.
+Warning: The smallest app partition is nearly full (0% free space left)!
+[2/5] Performing build step for 'bootloader'
+[1/1] cd /home/marujo/MECT/ASE/pratica/project/virtual-pet/build/bootloader/esp-idf/esptool_py && /home/marujo/.espressif/python_env/idf5.5_py3.14_env/bin/python /home/marujo/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /home/marujo/MECT/ASE/pratica/project/virtual-pet/build/bootloader/bootloader.bin
+Bootloader binary size 0x5840 bytes. 0x27c0 bytes (31%) free.
+[3/5] No install step for 'bootloader'
+[4/5] Completed 'bootloader'
+[4/5] cd /home/marujo/esp/esp-idf/components/esptool_py && /usr/bin/cmake -D IDF_PATH=/home/marujo/esp/esp-idf -D "SERIAL_TOOL=/home/marujo/.espressif/python_env/idf5.5_py3.14_env/bin/python;;/home/marujo/esp/esp-idf/components/esptool_py/esptool/esptool.py;--chip;esp32c6" -D "SERIAL_TOOL_ARGS=--before=default_reset;--after=hard_reset;write_flash;@flash_args" -D WORKING_DIRECTORY=/home/marujo/MECT/ASE/pratica/project/virtual-pet/build -P /home/marujo/esp/esp-idf/components/esptool_py/run_serial_tool.cmake
+esptool.py --chip esp32c6 -p /dev/ttyUSB0 -b 460800 --before=default_reset --after=hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 2MB 0x0 bootloader/bootloader.bin 0x10000 virtual-pet.bin 0x8000 partition_table/partition-table.bin
+esptool.py v4.12.dev1
+Serial port /dev/ttyUSB0
+Connecting....
+Chip is ESP32-C6 (QFN40) (revision v0.2)
+Features: Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Unknown Embedded Flash
+Crystal is 40MHz
+MAC: 20:6e:f1:ff:fe:17:72:24
+BASE MAC: 20:6e:f1:17:72:24
+MAC_EXT: ff:fe
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00000000 to 0x00005fff...
+Flash will be erased from 0x00010000 to 0x0010ffff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+SHA digest in image updated
+Compressed 22592 bytes to 13966...
+Writing at 0x00000000... (100 %)
+Wrote 22592 bytes (13966 compressed) at 0x00000000 in 0.5 seconds (effective 356.2 kbit/s)...
+Hash of data verified.
+Compressed 1048272 bytes to 597226...
+Writing at 0x00010000... (2 %)
+Writing at 0x0001cbe1... (5 %)
+Writing at 0x00029386... (8 %)
+Writing at 0x00032020... (10 %)
+Writing at 0x0003a4a2... (13 %)
+Writing at 0x0004185a... (16 %)
+Writing at 0x00049038... (18 %)
+Writing at 0x00050d72... (21 %)
+Writing at 0x00057959... (24 %)
+Writing at 0x0005f0d8... (27 %)
+Writing at 0x00065544... (29 %)
+Writing at 0x0006bf0d... (32 %)
+Writing at 0x00072c58... (35 %)
+Writing at 0x00079065... (37 %)
+Writing at 0x0007f890... (40 %)
+Writing at 0x000858b6... (43 %)
+Writing at 0x0008b343... (45 %)
+Writing at 0x000917c5... (48 %)
+Writing at 0x00097d36... (51 %)
+Writing at 0x0009dcff... (54 %)
+Writing at 0x000a3dea... (56 %)
+Writing at 0x000a9e2a... (59 %)
+Writing at 0x000aff24... (62 %)
+Writing at 0x000b6338... (64 %)
+Writing at 0x000bd0c1... (67 %)
+Writing at 0x000c43eb... (70 %)
+Writing at 0x000cb431... (72 %)
+Writing at 0x000d1fd1... (75 %)
+Writing at 0x000d83af... (78 %)
+Writing at 0x000de7e6... (81 %)
+Writing at 0x000e4c7d... (83 %)
+Writing at 0x000eae95... (86 %)
+Writing at 0x000f22c9... (89 %)
+Writing at 0x000f8a74... (91 %)
+Writing at 0x000ff68d... (94 %)
+Writing at 0x001051a1... (97 %)
+Writing at 0x0010b16d... (100 %)
+Wrote 1048272 bytes (597226 compressed) at 0x00010000 in 13.7 seconds (effective 613.5 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 103...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (103 compressed) at 0x00008000 in 0.0 seconds (effective 724.8 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...
+Done
