@@ -137,10 +137,12 @@ esp_err_t st7735_init(const st7735_config_t *cfg) {
         .queue_size = 7, .flags = SPI_DEVICE_NO_DUMMY,
     };
     
-    ret = spi_bus_initialize(cfg->host_id, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "SPI bus falhou: %s", esp_err_to_name(ret));
-        return ret;
+    if (!cfg->skip_bus_init) {
+        ret = spi_bus_initialize(cfg->host_id, &buscfg, SPI_DMA_CH_AUTO);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "SPI bus falhou: %s", esp_err_to_name(ret));
+            return ret;
+        }
     }
     ret = spi_bus_add_device(cfg->host_id, &devcfg, &spi);
     if (ret != ESP_OK) {

@@ -4,9 +4,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-// Define a tag for logging
-static const char *TAG = "driver_dht20";
-
 // DHT20 Commands
 #define DHT20_CMD_TRIGGER_MEASUREMENT 0xAC
 #define DHT20_CMD_TRIGGER_DATA_1      0x33

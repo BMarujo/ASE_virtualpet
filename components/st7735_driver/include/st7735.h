@@ -67,6 +67,7 @@ typedef struct {
     int rst_io_num;            /**< Pino GPIO para Reset (RST) */
     int bl_io_num;             /**< Pino GPIO para Backlight (Lite), -1 se não usado */
     spi_host_device_t host_id; /**< Host SPI (SPI2_HOST ou SPI3_HOST) */
+    bool skip_bus_init;        /**< true se outro periférico já inicializou o barramento SPI */
 } st7735_config_t;
 
 /* ==================== Funções Públicas ==================== */

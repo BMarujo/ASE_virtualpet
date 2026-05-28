@@ -1,5 +1,7 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -25,7 +27,7 @@
 // Includes dos componentes locais e drivers
 #include "driver_dht20.h"
 #include "st7735.h"
-#include "pet_assets.h"
+#include "assets/pet_assets.h"
 
 // Definições de Pinos e Configurações (Baseados no ESP32-C6)
 #define I2C_MASTER_SCL_IO           7
@@ -82,22 +84,48 @@ static int s_retry_num = 0;
 
 static const char *TAG = "VirtualPet";
 
+#define FOOD_BOWL_FILL_STEP       5
+#define FOOD_BOWL_DRAIN_STEP      2
+#define PET_EAT_THRESHOLD         8
+#define PET_EAT_AMOUNT            2
+#define HEALTH_SLEEP_THRESHOLD    25
+#define FLIP_DURATION_MS          1200
+#define FLIP_FRAME_MS             150
+#define HUMIDITY_FULL_DELTA       20.0f
+#define DEFAULT_HUMIDITY_BASELINE 50.0f
+
 // --- Estruturas de Dados do Pet ---
 typedef struct {
-    int hunger;       // 0-100 
-    int happiness;    // 0-100
-    int energy;       // 0-100
-    float last_temp;  
-    float last_hum;   
-    bool is_sleeping; 
+    int hunger;             // 0-100
+    int happiness;          // 0-100
+    int energy;             // 0-100
+    int food_bowl;          // 0-100
+    int food_bowl_target;   // 0-100, driven by the potentiometer
+    int water_meter;        // 0-100, driven by humidity increase
+    int health;             // 0-100, weighted from all other metrics
+    float last_temp;
+    float last_hum;
+    float humidity_baseline;
+    float humidity_delta;
+    bool humidity_ready;
+    bool is_sleeping;
+    bool is_flipping;
+    uint32_t flip_start_ms;
 } pet_state_t;
 
 pet_state_t pet_state = {
     .hunger = 100,
     .happiness = 100,
     .energy = 100,
+    .food_bowl = 0,
+    .food_bowl_target = 0,
+    .water_meter = 0,
+    .health = 100,
     .last_temp = 20.0,
     .last_hum = 50.0,
+    .humidity_baseline = DEFAULT_HUMIDITY_BASELINE,
+    .humidity_delta = 0.0f,
+    .humidity_ready = false,
     .is_sleeping = false
 };
 
@@ -105,29 +133,145 @@ SemaphoreHandle_t pet_state_mutex;
 QueueHandle_t button_evt_queue;
 adc_oneshot_unit_handle_t adc1_handle;
 
+static int clamp_int(int value, int min, int max) {
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+}
+
+static int percent_from_adc(int adc_raw) {
+    return clamp_int((adc_raw * 100) / 4095, 0, 100);
+}
+
+static void recompute_health(pet_state_t *state) {
+    int temp_penalty = 0;
+    if (state->last_temp > 30.0f) {
+        temp_penalty = clamp_int((int)((state->last_temp - 30.0f) * 3.0f), 0, 20);
+    }
+
+    int weighted_health =
+        (state->hunger * 30) +
+        (state->happiness * 20) +
+        (state->energy * 20) +
+        (state->water_meter * 20) +
+        (state->food_bowl * 10);
+
+    state->health = clamp_int((weighted_health / 100) - temp_penalty, 0, 100);
+}
+
+static const char *expression_for_state(const pet_state_t *state) {
+    if (state->is_sleeping) return "sleeping";
+    if (state->is_flipping) return "flipping";
+    if (state->energy < 30) return "tired";
+    if (state->water_meter < 20) return "thirsty";
+    if (state->hunger < 35) return "hungry";
+    if (state->happiness > 75 && state->health > 60) return "happy";
+    return "idle";
+}
+
+static const uint16_t *sprite_for_state(const pet_state_t *state, uint32_t now_ms) {
+    if (state->is_flipping) {
+        uint32_t elapsed = now_ms - state->flip_start_ms;
+        uint32_t frame = (elapsed / FLIP_FRAME_MS) % CAT_FLIP_FRAME_COUNT;
+        return cat_flip_frames[frame];
+    }
+
+    if (state->is_sleeping) return cat_sleep;
+    if (state->energy < 30) return cat_tired;
+    if (state->water_meter < 20) return cat_thirsty;
+    if (state->hunger < 35) return cat_hungry;
+    if (state->happiness > 75 && state->health > 60) return cat_happy;
+    return cat_idle;
+}
+
+static const uint16_t *bowl_sprite_for_fill(int fill) {
+    int frame = clamp_int((fill + 12) / 25, 0, BOWL_FRAME_COUNT - 1);
+    return food_bowl_frames[frame];
+}
+
 // --- Funções Auxiliares SD Card ---
-void load_pet_state() {
+void load_pet_state(void) {
     FILE* f = fopen("/sdcard/pet.txt", "r");
     if (f) {
-        int saved_hunger = 100;
-        fscanf(f, "%d", &saved_hunger);
+        pet_state_t loaded = pet_state;
+        char line[96];
+        bool parsed_versioned_state = false;
+
+        if (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "VP2", 3) == 0) {
+                parsed_versioned_state = true;
+                while (fgets(line, sizeof(line), f)) {
+                    char key[32];
+                    char value[32];
+                    if (sscanf(line, "%31[^=]=%31s", key, value) != 2) {
+                        continue;
+                    }
+
+                    if (strcmp(key, "hunger") == 0) loaded.hunger = atoi(value);
+                    else if (strcmp(key, "happiness") == 0) loaded.happiness = atoi(value);
+                    else if (strcmp(key, "energy") == 0) loaded.energy = atoi(value);
+                    else if (strcmp(key, "food_bowl") == 0) loaded.food_bowl = atoi(value);
+                    else if (strcmp(key, "food_bowl_target") == 0) loaded.food_bowl_target = atoi(value);
+                    else if (strcmp(key, "water_meter") == 0) loaded.water_meter = atoi(value);
+                    else if (strcmp(key, "health") == 0) loaded.health = atoi(value);
+                    else if (strcmp(key, "last_temp") == 0) loaded.last_temp = strtof(value, NULL);
+                    else if (strcmp(key, "last_hum") == 0) loaded.last_hum = strtof(value, NULL);
+                    else if (strcmp(key, "humidity_baseline") == 0) loaded.humidity_baseline = strtof(value, NULL);
+                    else if (strcmp(key, "humidity_delta") == 0) loaded.humidity_delta = strtof(value, NULL);
+                    else if (strcmp(key, "humidity_ready") == 0) loaded.humidity_ready = atoi(value) != 0;
+                }
+            } else {
+                loaded.hunger = atoi(line);
+                ESP_LOGW(TAG, "Estado antigo encontrado no SD; migrei apenas a fome.");
+            }
+        }
         fclose(f);
-        if(xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
-            pet_state.hunger = saved_hunger;
+
+        loaded.hunger = clamp_int(loaded.hunger, 0, 100);
+        loaded.happiness = clamp_int(loaded.happiness, 0, 100);
+        loaded.energy = clamp_int(loaded.energy, 0, 100);
+        loaded.food_bowl = clamp_int(loaded.food_bowl, 0, 100);
+        loaded.food_bowl_target = clamp_int(loaded.food_bowl_target, 0, 100);
+        loaded.water_meter = clamp_int(loaded.water_meter, 0, 100);
+        loaded.health = clamp_int(loaded.health, 0, 100);
+        loaded.is_sleeping = false;
+        loaded.is_flipping = false;
+        loaded.flip_start_ms = 0;
+        recompute_health(&loaded);
+
+        if (xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
+            pet_state = loaded;
             xSemaphoreGive(pet_state_mutex);
         }
-        ESP_LOGI(TAG, "Estado recuperado do SD Card: Fome = %d", saved_hunger);
+
+        if (parsed_versioned_state) {
+            ESP_LOGI(TAG, "Estado recuperado do SD Card: fome=%d bowl=%d water=%d health=%d",
+                     loaded.hunger, loaded.food_bowl, loaded.water_meter, loaded.health);
+        }
     } else {
         ESP_LOGW(TAG, "Nenhum estado anterior encontrado no SD (Ficheiro novo).");
     }
 }
 
-void save_pet_state(int current_hunger) {
+void save_pet_state(const pet_state_t *snapshot) {
     FILE* f = fopen("/sdcard/pet.txt", "w");
     if (f) {
-        fprintf(f, "%d\n", current_hunger);
+        fprintf(f, "VP2\n");
+        fprintf(f, "hunger=%d\n", snapshot->hunger);
+        fprintf(f, "happiness=%d\n", snapshot->happiness);
+        fprintf(f, "energy=%d\n", snapshot->energy);
+        fprintf(f, "food_bowl=%d\n", snapshot->food_bowl);
+        fprintf(f, "food_bowl_target=%d\n", snapshot->food_bowl_target);
+        fprintf(f, "water_meter=%d\n", snapshot->water_meter);
+        fprintf(f, "health=%d\n", snapshot->health);
+        fprintf(f, "last_temp=%.2f\n", snapshot->last_temp);
+        fprintf(f, "last_hum=%.2f\n", snapshot->last_hum);
+        fprintf(f, "humidity_baseline=%.2f\n", snapshot->humidity_baseline);
+        fprintf(f, "humidity_delta=%.2f\n", snapshot->humidity_delta);
+        fprintf(f, "humidity_ready=%d\n", snapshot->humidity_ready ? 1 : 0);
         fclose(f);
-        ESP_LOGI(TAG, "Estado guardado no SD Card! Fome = %d", current_hunger);
+        ESP_LOGI(TAG, "Estado guardado no SD Card! fome=%d bowl=%d water=%d health=%d",
+                 snapshot->hunger, snapshot->food_bowl, snapshot->water_meter, snapshot->health);
     } else {
         ESP_LOGE(TAG, "Falha ao abrir ficheiro no SD para guardar estado!");
     }
@@ -143,6 +287,21 @@ void sensor_task(void *pvParameters) {
         if (xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
             pet_state.last_temp = temperature;
             pet_state.last_hum = humidity;
+
+            if (!pet_state.humidity_ready) {
+                pet_state.humidity_baseline = humidity;
+                pet_state.humidity_delta = 0.0f;
+                pet_state.humidity_ready = true;
+            } else if (humidity < pet_state.humidity_baseline) {
+                pet_state.humidity_baseline = humidity;
+                pet_state.humidity_delta = 0.0f;
+                pet_state.water_meter = clamp_int(pet_state.water_meter - 5, 0, 100);
+            } else {
+                pet_state.humidity_delta = humidity - pet_state.humidity_baseline;
+                pet_state.water_meter = clamp_int((int)(pet_state.humidity_delta * (100.0f / HUMIDITY_FULL_DELTA)), 0, 100);
+            }
+
+            recompute_health(&pet_state);
             xSemaphoreGive(pet_state_mutex);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -152,62 +311,117 @@ void sensor_task(void *pvParameters) {
 void pet_logic_task(void *pvParameters) {
     uint32_t io_num;
     uint32_t wakeup_time_ms = 0; // Para controlar o "Grace Period" de 10s após acordar
+    uint32_t last_pet_tick_ms = 0;
+    uint32_t last_button_a_ms = 0;
+    uint32_t last_button_b_ms = 0;
+    uint32_t last_button_c_ms = 0;
 
     while(1) {
+        uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
         int adc_raw = 0;
         esp_err_t err = adc_oneshot_read(adc1_handle, ADC_CHANNEL, &adc_raw);
         if (err == ESP_OK) {
-            ESP_LOGI(TAG, "ADC Raw Value: %d", adc_raw);
+            ESP_LOGD(TAG, "ADC Raw Value: %d", adc_raw);
         } else {
             ESP_LOGE(TAG, "ADC Read Error: %s", esp_err_to_name(err));
         }
 
-        int decay_multiplier = (adc_raw / 800) + 1; // 1 a 6
-        ESP_LOGI(TAG, "Decay Multiplier: %d", decay_multiplier);
+        int bowl_target = percent_from_adc(adc_raw);
+        bool save_requested = false;
+        pet_state_t save_snapshot = {0};
 
-        if (xQueueReceive(button_evt_queue, &io_num, pdMS_TO_TICKS(1000))) {
+        while (xQueueReceive(button_evt_queue, &io_num, 0)) {
             if (xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
                 if (io_num == BUTTON_A_GPIO) {
-                    pet_state.hunger = (pet_state.hunger + 20 > 100) ? 100 : pet_state.hunger + 20;
-                    ESP_LOGI(TAG, "Botao A: Pet Alimentado!");
+                    if ((now_ms - last_button_a_ms) > 250 && !pet_state.is_sleeping) {
+                        pet_state.is_flipping = true;
+                        pet_state.flip_start_ms = now_ms;
+                        pet_state.happiness = clamp_int(pet_state.happiness + 12, 0, 100);
+                        pet_state.energy = clamp_int(pet_state.energy - 5, 0, 100);
+                        pet_state.hunger = clamp_int(pet_state.hunger - 1, 0, 100);
+                        recompute_health(&pet_state);
+                        ESP_LOGI(TAG, "Botao A: o gato fez um flip!");
+                        last_button_a_ms = now_ms;
+                    }
                 } else if (io_num == BUTTON_B_GPIO) {
-                    // Botão B (Pino 0) funciona como botão de SAVE manual!
-                    ESP_LOGI(TAG, "Botao B: A forçar gravação do estado no SD Card!");
-                    save_pet_state(pet_state.hunger);
+                    if ((now_ms - last_button_b_ms) > 250) {
+                        save_snapshot = pet_state;
+                        save_requested = true;
+                        ESP_LOGI(TAG, "Botao B: a guardar estado completo no SD Card!");
+                        last_button_b_ms = now_ms;
+                    }
+                } else if (io_num == BUTTON_C_GPIO) {
+                    if ((now_ms - last_button_c_ms) > 250) {
+                        ESP_LOGD(TAG, "Botao C ativo; reservado para acordar do Light Sleep.");
+                        last_button_c_ms = now_ms;
+                    }
                 }
-                // O Botão C não faz nada no modo ativo, serve apenas para acordar do Light Sleep
                 xSemaphoreGive(pet_state_mutex);
             }
+        }
+
+        if (save_requested) {
+            save_pet_state(&save_snapshot);
         }
         
         bool go_to_sleep = false;
         if (xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
-            pet_state.hunger = (pet_state.hunger - decay_multiplier > 0) ? pet_state.hunger - decay_multiplier : 0;
-            
-            if (pet_state.last_temp > 30.0) {
-                pet_state.energy = (pet_state.energy > 0) ? pet_state.energy - 2 : 0;
-            } else {
-                pet_state.energy = (pet_state.energy > 0) ? pet_state.energy - 1 : 0;
+            pet_state.food_bowl_target = bowl_target;
+            if (pet_state.food_bowl < pet_state.food_bowl_target) {
+                pet_state.food_bowl = clamp_int(pet_state.food_bowl + FOOD_BOWL_FILL_STEP, 0, pet_state.food_bowl_target);
+            } else if (pet_state.food_bowl > pet_state.food_bowl_target) {
+                pet_state.food_bowl = clamp_int(pet_state.food_bowl - FOOD_BOWL_DRAIN_STEP, pet_state.food_bowl_target, 100);
             }
 
-            // O LED fica desligado no estado normal
+            if (pet_state.is_flipping && (now_ms - pet_state.flip_start_ms) >= FLIP_DURATION_MS) {
+                pet_state.is_flipping = false;
+            }
+
+            if ((now_ms - last_pet_tick_ms) >= 2000) {
+                if (pet_state.food_bowl >= PET_EAT_THRESHOLD && pet_state.hunger < 100) {
+                    int eat_amount = (pet_state.food_bowl >= 60) ? PET_EAT_AMOUNT + 1 : PET_EAT_AMOUNT;
+                    eat_amount = clamp_int(eat_amount, 0, pet_state.food_bowl);
+                    pet_state.food_bowl = clamp_int(pet_state.food_bowl - eat_amount, 0, 100);
+                    pet_state.hunger = clamp_int(pet_state.hunger + eat_amount, 0, 100);
+                    pet_state.happiness = clamp_int(pet_state.happiness + 1, 0, 100);
+                } else {
+                    pet_state.hunger = clamp_int(pet_state.hunger - 1, 0, 100);
+                }
+
+                int energy_drop = (pet_state.last_temp > 30.0f) ? 2 : 1;
+                if (!pet_state.is_flipping && pet_state.hunger > 55 && pet_state.water_meter > 35) {
+                    pet_state.energy = clamp_int(pet_state.energy + 1, 0, 100);
+                } else {
+                    pet_state.energy = clamp_int(pet_state.energy - energy_drop, 0, 100);
+                }
+
+                if (pet_state.hunger < 30 || pet_state.water_meter < 15 || pet_state.energy < 20) {
+                    pet_state.happiness = clamp_int(pet_state.happiness - 2, 0, 100);
+                } else if (pet_state.food_bowl > 40 && pet_state.health > 55) {
+                    pet_state.happiness = clamp_int(pet_state.happiness + 1, 0, 100);
+                }
+                last_pet_tick_ms = now_ms;
+            }
+
+            recompute_health(&pet_state);
             gpio_set_level(LED_GPIO, 0);
 
-            // Light Sleep trigger: Fome < 20. Adicionado um "Grace Period" de 10 segundos (10000ms) após o arranque/acordar!
-            uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-            if (pet_state.hunger < 20 && (current_time - wakeup_time_ms > 10000)) {
+            if (pet_state.health < HEALTH_SLEEP_THRESHOLD && (now_ms - wakeup_time_ms > 10000)) {
                  go_to_sleep = true;
                  pet_state.is_sleeping = true;
+                 pet_state.is_flipping = false;
             }
             xSemaphoreGive(pet_state_mutex);
         }
 
         if (go_to_sleep) {
-            ESP_LOGI(TAG, "Fome critica (<20)! A entrar em Light Sleep...");
+            ESP_LOGI(TAG, "Saude critica (<%d)! A entrar em Light Sleep...", HEALTH_SLEEP_THRESHOLD);
             
             // Ligar o LED permanentemente durante o Light Sleep e reter o pino
             gpio_set_level(LED_GPIO, 1);
             gpio_hold_en((gpio_num_t)LED_GPIO);
+            gpio_set_level(PIN_BL, 0);
+            gpio_hold_en((gpio_num_t)PIN_BL);
             
             // Pequeno atraso para a task do ecrã atualizar o Sprite para dormir (Zzz)
             vTaskDelay(pdMS_TO_TICKS(1100));
@@ -223,6 +437,7 @@ void pet_logic_task(void *pvParameters) {
             ESP_LOGI(TAG, "Acordou do Light Sleep! (10s para alimentar antes de voltar a dormir)");
             
             gpio_hold_dis((gpio_num_t)LED_GPIO); // Libertar a retenção do pino
+            gpio_hold_dis((gpio_num_t)PIN_BL);
             
             // Desativar wakeup do botão C para evitar interrupções estranhas
             gpio_wakeup_disable((gpio_num_t)BUTTON_C_GPIO);
@@ -233,48 +448,114 @@ void pet_logic_task(void *pvParameters) {
             }
             
             gpio_set_level(LED_GPIO, 0); // Desligar LED
+            gpio_set_level(PIN_BL, 1);
             wakeup_time_ms = xTaskGetTickCount() * portTICK_PERIOD_MS; // Iniciar contagem dos 10s
         }
+
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
+static uint16_t health_bar_color(int health) {
+    if (health < HEALTH_SLEEP_THRESHOLD) return ST7735_RED;
+    if (health < 60) return ST7735_YELLOW;
+    return ST7735_GREEN;
+}
+
+static void draw_labeled_bar(uint16_t x, uint16_t y, const char *label, uint16_t bar_width, int percent, uint16_t fill_color) {
+    uint16_t label_width = strlen(label) * 6;
+    uint16_t bar_x = x + label_width + 2;
+    int fill_width = ((bar_width - 2) * clamp_int(percent, 0, 100)) / 100;
+
+    st7735_draw_string(x, y, label, ST7735_WHITE, ST7735_BLACK, 1);
+    st7735_fill_rect(bar_x, y, bar_width, 6, ST7735_GRAY);
+    st7735_fill_rect(bar_x + 1, y + 1, bar_width - 2, 4, ST7735_BLACK);
+    if (fill_width > 0) {
+        st7735_fill_rect(bar_x + 1, y + 1, fill_width, 4, fill_color);
+    }
+}
+
+static void draw_changed_text(uint16_t x, uint16_t y, uint16_t w, const char *text,
+                              char *previous, size_t previous_size,
+                              uint16_t color) {
+    if (strncmp(previous, text, previous_size) == 0) {
+        return;
+    }
+
+    st7735_fill_rect(x, y, w, 8, ST7735_BLACK);
+    st7735_draw_string(x, y, text, color, ST7735_BLACK, 1);
+    strlcpy(previous, text, previous_size);
+}
+
 void display_task(void *pvParameters) {
-    char temp_str[32];
-    char hum_str[32];
-    char status_str[32];
+    char status_str[40];
+    char sensor_str[40];
+    bool first_frame = true;
+    char previous_status[40] = "";
+    char previous_sensor[40] = "";
+    char previous_expression[16] = "";
+    int previous_health = -1;
+    int previous_water = -1;
+    int previous_hunger = -1;
+    int previous_energy = -1;
+    const uint16_t *previous_sprite = NULL;
+    const uint16_t *previous_bowl_sprite = NULL;
 
     while(1) {
-        float temp = 0.0f;
-        float hum = 0.0f;
-        int fome = 0;
-        bool is_sleeping = false;
+        pet_state_t snapshot;
 
         if (xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
-            temp = pet_state.last_temp;
-            hum = pet_state.last_hum;
-            fome = pet_state.hunger;
-            is_sleeping = pet_state.is_sleeping;
+            snapshot = pet_state;
             xSemaphoreGive(pet_state_mutex);
-        }
-        
-        snprintf(temp_str, sizeof(temp_str), "Temp: %.1f C", temp);
-        snprintf(hum_str, sizeof(hum_str), "Hum: %.1f %%", hum);
-        snprintf(status_str, sizeof(status_str), "Fome: %d ", fome);
-
-        st7735_fill_rect(5, 5, 150, 40, ST7735_BLACK);
-        st7735_draw_string(5, 5, temp_str, ST7735_WHITE, ST7735_BLACK, 1);
-        st7735_draw_string(5, 20, hum_str, ST7735_WHITE, ST7735_BLACK, 1);
-        st7735_draw_string(5, 35, status_str, ST7735_CYAN, ST7735_BLACK, 1);
-
-        const uint16_t *current_sprite = pet_happy;
-        if (is_sleeping) {
-            current_sprite = pet_sleep;
-        } else if (fome < 50) {
-            current_sprite = pet_sad;
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
         }
 
-        st7735_draw_image(64, 50, PET_WIDTH, PET_HEIGHT, current_sprite);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        const uint16_t *current_sprite = sprite_for_state(&snapshot, now_ms);
+        const uint16_t *bowl_sprite = bowl_sprite_for_fill(snapshot.food_bowl);
+        const char *expression = expression_for_state(&snapshot);
+
+        snprintf(status_str, sizeof(status_str), "Bowl:%3d%% Mood:%3d", snapshot.food_bowl, snapshot.happiness);
+        snprintf(sensor_str, sizeof(sensor_str), "T:%.1fC H:%.1f%% d:%.1f", snapshot.last_temp, snapshot.last_hum, snapshot.humidity_delta);
+
+        if (first_frame) {
+            st7735_fill_screen(ST7735_BLACK);
+            first_frame = false;
+        }
+
+        if (snapshot.health != previous_health) {
+            draw_labeled_bar(2, 2, "HP", 54, snapshot.health, health_bar_color(snapshot.health));
+            previous_health = snapshot.health;
+        }
+        if (snapshot.water_meter != previous_water) {
+            draw_labeled_bar(82, 2, "H2O", 50, snapshot.water_meter, ST7735_CYAN);
+            previous_water = snapshot.water_meter;
+        }
+        if (snapshot.hunger != previous_hunger) {
+            draw_labeled_bar(2, 11, "F", 60, snapshot.hunger, ST7735_ORANGE);
+            previous_hunger = snapshot.hunger;
+        }
+        if (snapshot.energy != previous_energy) {
+            draw_labeled_bar(82, 11, "E", 60, snapshot.energy, ST7735_MAGENTA);
+            previous_energy = snapshot.energy;
+        }
+
+        draw_changed_text(2, 22, 154, status_str, previous_status, sizeof(previous_status), ST7735_WHITE);
+        draw_changed_text(2, 72, 154, sensor_str, previous_sensor, sizeof(previous_sensor), ST7735_GRAY);
+        draw_changed_text(106, 38, 54, expression, previous_expression, sizeof(previous_expression), ST7735_GRAY);
+
+        if (current_sprite != previous_sprite) {
+            st7735_draw_image(18, 39, CAT_SPRITE_WIDTH, CAT_SPRITE_HEIGHT, current_sprite);
+            previous_sprite = current_sprite;
+        }
+        if (bowl_sprite != previous_bowl_sprite) {
+            st7735_draw_image(108, 50, BOWL_SPRITE_WIDTH, BOWL_SPRITE_HEIGHT, bowl_sprite);
+            previous_bowl_sprite = bowl_sprite;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(snapshot.is_flipping ? FLIP_FRAME_MS : 1000));
     }
 }
 
@@ -336,23 +617,31 @@ void wifi_telemetry_task(void *pvParameters) {
     esp_mqtt_client_start(client);
 
     while(1) {
-        float temp = 0.0f;
-        float hum = 0.0f;
-        int fome = 0;
-        int energy = 0;
-        int happiness = 0;
+        pet_state_t snapshot;
 
         if (xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
-            temp = pet_state.last_temp;
-            hum = pet_state.last_hum;
-            fome = pet_state.hunger;
-            energy = pet_state.energy;
-            happiness = pet_state.happiness;
+            snapshot = pet_state;
             xSemaphoreGive(pet_state_mutex);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
 
-        char payload[128];
-        snprintf(payload, sizeof(payload), "{\"temp\":%.1f, \"hum\":%.1f, \"hunger\":%d, \"energy\":%d, \"happiness\":%d}", temp, hum, fome, energy, happiness);
+        char payload[320];
+        snprintf(payload, sizeof(payload),
+                 "{\"temp\":%.1f,\"hum\":%.1f,\"humidity_delta\":%.1f,"
+                 "\"hunger\":%d,\"energy\":%d,\"happiness\":%d,"
+                 "\"food_bowl\":%d,\"food_bowl_target\":%d,"
+                 "\"water_meter\":%d,\"health\":%d,"
+                 "\"is_sleeping\":%s,\"is_flipping\":%s,\"expression\":\"%s\"}",
+                 snapshot.last_temp, snapshot.last_hum, snapshot.humidity_delta,
+                 snapshot.hunger, snapshot.energy, snapshot.happiness,
+                 snapshot.food_bowl, snapshot.food_bowl_target,
+                 snapshot.water_meter, snapshot.health,
+                 snapshot.is_sleeping ? "true" : "false",
+                 snapshot.is_flipping ? "true" : "false",
+                 expression_for_state(&snapshot));
+        ESP_LOGI(TAG, "MQTT status: %s", payload);
         esp_mqtt_client_publish(client, "virtualpet/status", payload, 0, 1, 0);
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
@@ -420,7 +709,7 @@ void app_main(void) {
         .max_transfer_sz = 4000,
     };
     // SPI bus will be initialized, then ST7735 config will be adjusted to not re-init.
-    spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     // SD Card Init
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -452,12 +741,12 @@ void app_main(void) {
        .dc_io_num = PIN_DC,
        .rst_io_num = PIN_RST,
        .bl_io_num = PIN_BL,
-       .host_id = SPI2_HOST
+       .host_id = SPI2_HOST,
+       .skip_bus_init = true
     };
-    // A driver vai dar erro de estado ao iniciar o bus, mas deve adicionar o device.
     st7735_init(&tft_cfg);
     st7735_fill_screen(ST7735_BLACK);
-    st7735_draw_string(10, 2, "Virtual Pet IoT", ST7735_YELLOW, ST7735_BLACK, 1);
+    st7735_draw_string(10, 2, "Virtual Cat IoT", ST7735_YELLOW, ST7735_BLACK, 1);
 
     xTaskCreate(sensor_task, "sensor_task", 4096, (void*)&dht20Handle, 5, NULL);
     xTaskCreate(pet_logic_task, "pet_logic_task", 4096, NULL, 5, NULL);
