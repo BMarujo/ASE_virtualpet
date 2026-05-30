@@ -84,10 +84,10 @@ static int s_retry_num = 0;
 
 static const char *TAG = "VirtualPet";
 
-#define FOOD_BOWL_FILL_STEP       5
-#define FOOD_BOWL_DRAIN_STEP      2
-#define PET_EAT_THRESHOLD         8
-#define PET_EAT_AMOUNT            2
+#define FOOD_BOWL_FILL_STEP       15
+#define FOOD_BOWL_DRAIN_STEP      5
+#define PET_EAT_THRESHOLD         5
+#define PET_EAT_AMOUNT            8
 #define HEALTH_SLEEP_THRESHOLD    25
 #define FLIP_DURATION_MS          1200
 #define FLIP_FRAME_MS             150
@@ -238,6 +238,7 @@ void load_pet_state(void) {
         loaded.is_sleeping = false;
         loaded.is_flipping = false;
         loaded.flip_start_ms = 0;
+        loaded.humidity_ready = false; // Força uma nova calibração térmica inicial no arranque
         recompute_health(&loaded);
 
         if (xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
@@ -271,8 +272,8 @@ void save_pet_state(const pet_state_t *snapshot) {
         fprintf(f, "humidity_delta=%.2f\n", snapshot->humidity_delta);
         fprintf(f, "humidity_ready=%d\n", snapshot->humidity_ready ? 1 : 0);
         fclose(f);
-        ESP_LOGI(TAG, "Estado guardado no SD Card! fome=%d bowl=%d water=%d health=%d",
-                 snapshot->hunger, snapshot->food_bowl, snapshot->water_meter, snapshot->health);
+        ESP_LOGI(TAG, "Estado guardado no SD Card! fome=%d energia=%d feliz=%d agua=%d tigela=%d hp=%d",
+                 snapshot->hunger, snapshot->energy, snapshot->happiness, snapshot->water_meter, snapshot->food_bowl, snapshot->health);
     } else {
         ESP_LOGE(TAG, "Falha ao abrir ficheiro no SD para guardar estado!");
     }
@@ -287,19 +288,21 @@ void sensor_task(void *pvParameters) {
         dht20_read_data_after_wait(*sensorHandle, &temperature, &humidity);
         if (xSemaphoreTake(pet_state_mutex, portMAX_DELAY)) {
             pet_state.last_temp = temperature;
-            pet_state.last_hum = humidity;
 
             if (!pet_state.humidity_ready) {
-                pet_state.humidity_baseline = humidity;
+                pet_state.last_hum = humidity;
                 pet_state.humidity_delta = 0.0f;
                 pet_state.humidity_ready = true;
-            } else if (humidity < pet_state.humidity_baseline) {
-                pet_state.humidity_baseline = humidity;
-                pet_state.humidity_delta = 0.0f;
-                pet_state.water_meter = clamp_int(pet_state.water_meter - 5, 0, 100);
             } else {
-                pet_state.humidity_delta = humidity - pet_state.humidity_baseline;
-                pet_state.water_meter = clamp_int((int)(pet_state.humidity_delta * (100.0f / HUMIDITY_FULL_DELTA)), 0, 100);
+                float diff = humidity - pet_state.last_hum;
+                if (diff > 0.5f) { // Soprou para o sensor (aumento)
+                    int water_boost = (int)(diff * 3.0f); // 1% de humidade = 3% de água
+                    pet_state.water_meter = clamp_int(pet_state.water_meter + water_boost, 0, 100);
+                    pet_state.humidity_delta = diff;
+                } else {
+                    pet_state.humidity_delta = 0.0f;
+                }
+                pet_state.last_hum = humidity; // Atualiza a "memória" para o próximo ciclo
             }
 
             recompute_health(&pet_state);
@@ -380,18 +383,21 @@ void pet_logic_task(void *pvParameters) {
 
             if ((now_ms - last_pet_tick_ms) >= 2000) {
                 if (pet_state.food_bowl >= PET_EAT_THRESHOLD && pet_state.hunger < 100) {
-                    int eat_amount = (pet_state.food_bowl >= 60) ? PET_EAT_AMOUNT + 1 : PET_EAT_AMOUNT;
+                    int eat_amount = (pet_state.food_bowl >= 60) ? PET_EAT_AMOUNT + 4 : PET_EAT_AMOUNT;
                     eat_amount = clamp_int(eat_amount, 0, pet_state.food_bowl);
                     pet_state.food_bowl = clamp_int(pet_state.food_bowl - eat_amount, 0, 100);
                     pet_state.hunger = clamp_int(pet_state.hunger + eat_amount, 0, 100);
-                    pet_state.happiness = clamp_int(pet_state.happiness + 1, 0, 100);
+                    pet_state.happiness = clamp_int(pet_state.happiness + 3, 0, 100);
                 } else {
-                    pet_state.hunger = clamp_int(pet_state.hunger - 1, 0, 100);
+                    pet_state.hunger = clamp_int(pet_state.hunger - 3, 0, 100);
                 }
+                
+                // Decaimento natural acelerado da água
+                pet_state.water_meter = clamp_int(pet_state.water_meter - 3, 0, 100);
 
-                int energy_drop = (pet_state.last_temp > 30.0f) ? 2 : 1;
+                int energy_drop = (pet_state.last_temp > 30.0f) ? 6 : 3;
                 if (!pet_state.is_flipping && pet_state.hunger > 55 && pet_state.water_meter > 35) {
-                    pet_state.energy = clamp_int(pet_state.energy + 1, 0, 100);
+                    pet_state.energy = clamp_int(pet_state.energy + 5, 0, 100);
                 } else {
                     pet_state.energy = clamp_int(pet_state.energy - energy_drop, 0, 100);
                 }
@@ -407,7 +413,7 @@ void pet_logic_task(void *pvParameters) {
             recompute_health(&pet_state);
             gpio_set_level(LED_GPIO, 0);
 
-            if (pet_state.health < HEALTH_SLEEP_THRESHOLD && (now_ms - wakeup_time_ms > 10000)) {
+            if (pet_state.health < HEALTH_SLEEP_THRESHOLD && (now_ms - wakeup_time_ms > 20000)) {
                  go_to_sleep = true;
                  pet_state.is_sleeping = true;
                  pet_state.is_flipping = false;
@@ -422,8 +428,10 @@ void pet_logic_task(void *pvParameters) {
             gpio_set_level(LED_GPIO, 1);
             gpio_hold_en((gpio_num_t)LED_GPIO);
             
-            // Pequeno atraso para a task do ecrã atualizar o Sprite para dormir (Zzz) ANTES de apagar a luz
-            vTaskDelay(pdMS_TO_TICKS(1100));
+            // Atraso de 3 segundos para garantir duas coisas:
+            // 1. O utilizador vê o sprite "Zzz" com clareza antes do ecrã apagar.
+            // 2. O RTOS e a stack TCP/IP do Wi-Fi têm tempo de sobra para efetuar o "flush" completo do pacote MQTT "is_sleeping:true"
+            vTaskDelay(pdMS_TO_TICKS(3000));
 
             // Desligar o Ecrã e fixar o pino em baixo durante o sono profundo
             gpio_set_level(PIN_BL, 0);
@@ -437,7 +445,7 @@ void pet_logic_task(void *pvParameters) {
             esp_light_sleep_start();
 
             // --- ESP32 ACORDA AQUI ---
-            ESP_LOGI(TAG, "Acordou do Light Sleep! (10s para alimentar antes de voltar a dormir)");
+            ESP_LOGI(TAG, "Acordou do Light Sleep! (20s para alimentar antes de voltar a dormir)");
             
             // Limpar a fila de eventos de botões para ignorar ruído elétrico/glitches gerados ao adormecer ou acordar
             xQueueReset(button_evt_queue);
@@ -455,7 +463,7 @@ void pet_logic_task(void *pvParameters) {
             
             gpio_set_level(LED_GPIO, 0); // Desligar LED
             gpio_set_level(PIN_BL, 1);
-            wakeup_time_ms = xTaskGetTickCount() * portTICK_PERIOD_MS; // Iniciar contagem dos 10s
+            wakeup_time_ms = xTaskGetTickCount() * portTICK_PERIOD_MS; // Iniciar contagem dos 20s
         }
 
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -615,11 +623,32 @@ void wifi_init_sta(void)
     xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 }
 
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
+    esp_mqtt_event_handle_t event = event_data;
+    if (event_id == MQTT_EVENT_CONNECTED) {
+        esp_mqtt_client_subscribe(event->client, "virtualpet/command", 0);
+        ESP_LOGI(TAG, "MQTT subscrito: virtualpet/command");
+    } else if (event_id == MQTT_EVENT_DATA) {
+        if (event->topic_len == 18 && strncmp(event->topic, "virtualpet/command", 18) == 0) {
+            char payload[64];
+            int len = event->data_len < 63 ? event->data_len : 63;
+            memcpy(payload, event->data, len);
+            payload[len] = '\0';
+            if (strstr(payload, "play") != NULL) {
+                uint32_t io_num = BUTTON_A_GPIO;
+                xQueueSend(button_evt_queue, &io_num, 0);
+                ESP_LOGI(TAG, "Comando MQTT: PLAY! Simulando Botao A.");
+            }
+        }
+    }
+}
+
 void wifi_telemetry_task(void *pvParameters) {
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = "mqtt://10.229.103.1:1883",
     };
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(client);
 
     while(1) {

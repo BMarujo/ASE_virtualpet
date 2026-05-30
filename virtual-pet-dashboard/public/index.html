@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Pet Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+        body { font-family: 'Press Start 2P', cursive; background-color: #0f172a; color: white; margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .pixel-art { image-rendering: pixelated; }
+        .bar-container { width: 100%; background: #334155; border: 4px solid #1e293b; border-radius: 12px; overflow: hidden; height: 32px; position: relative;}
+        .bar-fill { height: 100%; transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .bar-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; text-shadow: 2px 2px 0 #000; z-index: 10;}
+        
+        .cat { width: 256px; height: 256px; margin: 0 auto; position: relative; transition: all 0.2s; }
+        
+        /* Inline Pixel Art SVGs using backgrounds */
+        .cat-idle { background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%2360A5FA" d="M2 2h3v2h6V2h3v5h1v6h-2v1H3v-1H1V7h1z"/><path fill="%23fff" d="M4 6h2v2H4zm6 0h2v2h-2z"/><path fill="%23000" d="M5 7h1v1H5zm6 0h1v1h-1z"/><path fill="%23F472B6" d="M7 9h2v1H7z"/></svg>') no-repeat center; background-size: contain; }
+        .cat-happy { background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%2334D399" d="M2 2h3v2h6V2h3v5h1v6h-2v1H3v-1H1V7h1z"/><path fill="%23000" d="M4 6h2v1H4zm6 0h2v1h-2z"/><path fill="%23F472B6" d="M6 9h4v2H6z"/><path fill="%23fff" d="M7 10h2v1H7z"/></svg>') no-repeat center; background-size: contain; }
+        .cat-sleeping { background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%239CA3AF" d="M2 4h3v2h6V4h3v5h1v6h-2v1H3v-1H1V9h1z"/><path fill="%23000" d="M4 8h2v1H4zm6 0h2v1h-2z"/></svg>') no-repeat center; background-size: contain; }
+        .cat-hungry { background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%23F87171" d="M2 2h3v2h6V2h3v5h1v6h-2v1H3v-1H1V7h1z"/><path fill="%23fff" d="M4 6h2v3H4zm6 0h2v3h-2z"/><path fill="%23000" d="M5 7h1v1H5zm6 0h1v1h-1z"/><path fill="%23000" d="M7 11h2v1H7z"/></svg>') no-repeat center; background-size: contain; }
+        .cat-tired { background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%23A78BFA" d="M2 3h3v2h6V3h3v5h1v6h-2v1H3v-1H1V8h1z"/><path fill="%23000" d="M4 7h2v1H4zm6 0h2v1h-2z"/><path fill="%23000" d="M7 10h2v1H7z"/></svg>') no-repeat center; background-size: contain; }
+        .cat-thirsty { background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%23FBBF24" d="M2 2h3v2h6V2h3v5h1v6h-2v1H3v-1H1V7h1z"/><path fill="%23fff" d="M4 6h2v2H4zm6 0h2v2h-2z"/><path fill="%23000" d="M5 7h1v1H5zm6 0h1v1h-1z"/><path fill="%2360A5FA" d="M7 10h2v2H7z"/></svg>') no-repeat center; background-size: contain; }
+        .cat-flipping { animation: spin 1.2s ease-in-out infinite; background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%23FBBF24" d="M2 2h3v2h6V2h3v5h1v6h-2v1H3v-1H1V7h1z"/><path fill="%23000" d="M4 6h2v1H4zm6 0h2v1h-2z"/><path fill="%23F472B6" d="M6 9h4v2H6z"/><path fill="%23fff" d="M7 10h2v1H7z"/></svg>') no-repeat center; background-size: contain; }
+
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        .sleep-overlay {
+            position: absolute; inset: 0; background: rgba(0,0,0,0.85); z-index: 50;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            opacity: 0; pointer-events: none; transition: opacity 0.5s; backdrop-filter: blur(4px);
+        }
+        .sleep-overlay.active { opacity: 1; pointer-events: auto; }
+        
+        .btn-play {
+            background-color: #ec4899; color: white; padding: 1.5rem 3rem; border-radius: 9999px; border: 4px solid #be185d;
+            cursor: pointer; box-shadow: 0 6px 0px #831843; transition: all 0.1s;
+        }
+        .btn-play:active { transform: translateY(6px); box-shadow: 0 0px 0px #831843; }
+        .btn-play:disabled { background-color: #4b5563; border-color: #374151; box-shadow: 0 6px 0px #1f2937; cursor: not-allowed; transform: none; }
+        .btn-play:disabled:active { transform: none; box-shadow: 0 6px 0px #1f2937; }
+    </style>
+</head>
+<body class="p-4 w-full">
+    <div class="max-w-5xl w-full mx-auto bg-gray-800 rounded-[2rem] border-8 border-gray-900 shadow-[0_20px_50px_rgba(0,0,0,0.5)] overflow-hidden relative flex flex-col md:flex-row">
+        
+        <!-- Sleep Overlay -->
+        <div id="sleepOverlay" class="sleep-overlay">
+            <h2 class="text-4xl text-yellow-300 mb-8 animate-pulse text-center leading-relaxed">Zzz... Zzz...</h2>
+            <div class="bg-gray-900 p-8 rounded-2xl border-4 border-gray-700 mx-4 max-w-lg">
+                <p class="text-center text-gray-300 leading-relaxed text-sm md:text-base">
+                    O Pet está em modo de <span class="text-blue-400">Light Sleep</span> para poupar bateria.<br><br>
+                    <span class="text-white">Por favor interaja fisicamente com o Tamagotchi (pressione o Botão C na placa) para o acordar.</span>
+                </p>
+            </div>
+        </div>
+
+        <!-- Left Panel: Pet View -->
+        <div class="flex-1 p-10 flex flex-col items-center justify-center bg-gray-700 relative border-b-8 md:border-b-0 md:border-r-8 border-gray-900">
+            <div class="bg-gray-900 p-4 rounded-xl w-full flex justify-between mb-8 shadow-inner border-2 border-gray-800">
+                <div class="text-sm">🌡️ <span id="valTemp" class="text-white text-lg">--</span> °C</div>
+                <div class="text-sm">💧 <span id="valHum" class="text-white text-lg">--</span> %</div>
+            </div>
+
+            <div id="catSprite" class="cat cat-idle pixel-art mb-12 drop-shadow-2xl"></div>
+            
+            <button id="btnPlay" class="btn-play text-xl md:text-2xl uppercase tracking-widest mt-4">
+                Brincar!
+            </button>
+            <p class="text-[10px] text-gray-400 mt-6 text-center leading-relaxed">Envia o comando de interacção<br>para o ESP32 via MQTT</p>
+        </div>
+
+        <!-- Right Panel: Stats -->
+        <div class="flex-1 p-8 md:p-12 flex flex-col justify-center space-y-8 bg-gray-800">
+            <h1 class="text-3xl text-center text-pink-400 mb-2 border-b-4 border-gray-700 pb-6 uppercase tracking-wider shadow-sm">IoT Tamagotchi</h1>
+            
+            <!-- Health Bar -->
+            <div>
+                <label class="text-sm text-green-400 mb-2 block">❤ SAÚDE GLOBAL (HP)</label>
+                <div class="bar-container border-green-900 shadow-inner h-10">
+                    <div id="barHealth" class="bar-fill bg-gradient-to-r from-green-600 to-green-400" style="width: 0%;"></div>
+                    <div id="txtHealth" class="bar-text text-sm">--%</div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 gap-6 mt-4">
+                <!-- Fome -->
+                <div>
+                    <label class="text-xs text-orange-400 mb-2 block">🍗 FOME</label>
+                    <div class="bar-container border-orange-900">
+                        <div id="barHunger" class="bar-fill bg-orange-500" style="width: 0%;"></div>
+                        <div id="txtHunger" class="bar-text">--%</div>
+                    </div>
+                </div>
+                <!-- Energia -->
+                <div>
+                    <label class="text-xs text-purple-400 mb-2 block">⚡ ENERGIA</label>
+                    <div class="bar-container border-purple-900">
+                        <div id="barEnergy" class="bar-fill bg-purple-500" style="width: 0%;"></div>
+                        <div id="txtEnergy" class="bar-text">--%</div>
+                    </div>
+                </div>
+                <!-- Felicidade -->
+                <div>
+                    <label class="text-xs text-pink-400 mb-2 block">😊 FELICIDADE</label>
+                    <div class="bar-container border-pink-900">
+                        <div id="barHappiness" class="bar-fill bg-pink-500" style="width: 0%;"></div>
+                        <div id="txtHappiness" class="bar-text">--%</div>
+                    </div>
+                </div>
+                <!-- Água -->
+                <div>
+                    <label class="text-xs text-blue-400 mb-2 block">💧 ÁGUA</label>
+                    <div class="bar-container border-blue-900">
+                        <div id="barWater" class="bar-fill bg-blue-500" style="width: 0%;"></div>
+                        <div id="txtWater" class="bar-text">--%</div>
+                    </div>
+                </div>
+                <!-- Tigela -->
+                <div>
+                    <label class="text-xs text-yellow-400 mb-2 flex justify-between items-center">
+                        <span>🥣 TIGELA DE COMIDA</span>
+                        <span class="text-gray-500 text-[10px] bg-gray-900 px-2 py-1 rounded">ADC: <span id="valBowlTarget">--</span>%</span>
+                    </label>
+                    <div class="bar-container border-yellow-900">
+                        <div id="barBowl" class="bar-fill bg-yellow-500" style="width: 0%;"></div>
+                        <div id="txtBowl" class="bar-text">--%</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+
+        const catSprite = document.getElementById('catSprite');
+        const sleepOverlay = document.getElementById('sleepOverlay');
+        const btnPlay = document.getElementById('btnPlay');
+
+        const updateBar = (id, val) => {
+            document.getElementById('bar' + id).style.width = Math.min(100, Math.max(0, val)) + '%';
+            document.getElementById('txt' + id).innerText = val + '%';
+        };
+
+        socket.on('pet_status', (data) => {
+            console.log("Status recebido:", data);
+            
+            // Text values
+            document.getElementById('valTemp').innerText = data.temp.toFixed(1);
+            document.getElementById('valHum').innerText = data.hum.toFixed(1);
+            document.getElementById('valBowlTarget').innerText = data.food_bowl_target;
+
+            // Bar updates
+            updateBar('Health', data.health);
+            updateBar('Hunger', data.hunger);
+            updateBar('Energy', data.energy);
+            updateBar('Happiness', data.happiness);
+            updateBar('Water', data.water_meter);
+            updateBar('Bowl', data.food_bowl);
+
+            // Hardware-driven Sprite Logic
+            if (data.is_sleeping === "true" || data.is_sleeping === true) {
+                sleepOverlay.classList.add('active');
+                btnPlay.disabled = true;
+                catSprite.className = `cat pixel-art cat-sleeping`;
+            } else {
+                sleepOverlay.classList.remove('active');
+                btnPlay.disabled = false;
+                
+                if (data.is_flipping === "true" || data.is_flipping === true) {
+                    catSprite.className = `cat pixel-art cat-flipping`;
+                } else {
+                    catSprite.className = `cat pixel-art cat-${data.expression}`;
+                }
+            }
+        });
+
+        btnPlay.addEventListener('click', () => {
+            // Feedback visual imediato (será sobrescrito/confirmado pelo hardware nos próximos milissegundos)
+            catSprite.className = `cat pixel-art cat-flipping`;
+            // Envia evento websocket para o backend Node.js
+            socket.emit('command', { action: 'play' });
+        });
+    </script>
+</body>
+</html>

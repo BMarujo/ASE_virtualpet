@@ -61,7 +61,7 @@ O potenciômetro não alimenta o gato magicamente. Em vez disso, ele controla um
 A cada dois segundos, se a tigela tiver comida, o gato vai **comer autonomamente**, reduzindo o conteúdo da tigela, satisfazendo a fome e aumentando ligeiramente a felicidade.
 
 ### C. Água e Respiração (Sensor de Humidade DHT20)
-O sistema calibra um `baseline` de humidade no arranque. Se o utilizador respirar/soprar diretamente para o sensor DHT20, o delta de humidade aumenta exponencialmente, o que se traduz em recarregar o "Medidor de Água" (`H2O`) da personagem!
+O nível de Água (`water_meter`) decai naturalmente ao longo do tempo como a fome. O sistema calibra um `baseline` de humidade no arranque (ignorando saves antigos). Se o utilizador respirar/soprar diretamente para o sensor DHT20, o sistema calcula o diferencial (Delta) positivo de humidade face à leitura anterior, multiplicando esse aumento por 3 e injetando na água. Se a humidade estabilizar (mesmo que num valor alto), a água não sobe mais, obrigando a novos "sopros" para a voltar a encher.
 
 ### D. Animações e Cansaço (Botão A)
 Clicar no Botão A (GPIO 23) faz o gato executar um "Flip" (animação por *frames* renderizada no ecrã). Isto diverte o gato (ganha felicidade), mas tem um custo claro de energia e fome.
@@ -74,11 +74,28 @@ Se a **Saúde Global (HP)** cair abaixo do threshold crítico (< 25):
 *   O sistema entra em **Light Sleep** (`esp_light_sleep_start()`), pausando o CPU e a lógica do jogo mas mantendo a RAM intocável.
 *   O ecrã apaga a sua luz de fundo (para poupar bateria), e o LED (GPIO 5) acende indicando o coma/sono.
 *   O único modo de acordar o ESP32 é clicando no **Botão C (GPIO 4)**. 
-*   Ao acordar, o jogo não volta a dormir de imediato! Há um **Período de Graça de 10 Segundos**. Durante estes 10 segundos o utilizador tem de rodar o potenciómetro para encher a tigela, ou soprar para a água, de modo a subir a Saúde do gato para cima de 25, ou ele voltará a desmaiar.
+*   Ao acordar, o jogo não volta a dormir de imediato! Há um **Período de Graça de 20 Segundos**. Durante estes 20 segundos o utilizador tem de rodar o potenciómetro para encher a tigela, ou soprar para a água, de modo a subir a Saúde do gato para cima de 25, ou ele voltará a desmaiar.
 
 ---
 
-## 5. Como Compilar e Executar
+## 5. Web Dashboard (Node.js + WebSockets)
+
+Adicionalmente ao hardware, existe uma Web Dashboard completa e responsiva alojada na pasta `virtual-pet-dashboard`. 
+A Dashboard corre num servidor Express (Node.js) e serve como ponte bidirecional entre o MQTT e o *Browser* do utilizador através de WebSockets:
+*   **Visualização:** Desenha um gato em SVG *Pixel Art* que muda de expressão e animações sincronizadas em milissegundos com as métricas recebidas (JSON) do ESP32.
+*   **Controlo (MQTT Bidirecional):** Ao clicar no botão "Brincar!" no browser, a Dashboard publica um payload MQTT `play` de volta para o *Broker*. O ESP32 intercepta a mensagem, simula um clique no GPIO 23 e o gato dá um *Flip* no ecrã TFT físico e no *Browser*!
+
+Para correr a Dashboard:
+```bash
+cd /home/marujo/MECT/ASE/pratica/project/virtual-pet-dashboard
+npm install
+npm start
+```
+De seguida, abrir `http://localhost:3000` no navegador.
+
+---
+
+## 6. Como Compilar e Executar (Firmware)
 
 A *Partition Table* foi estendida para 4MB Flash (aumentando a `factory app` capacity) devido à vastidão de bibliotecas associadas (SDMMC, FatFs, WiFi, MQTT, Ecrã TFT). O SDK também já grava o teu Wi-Fi nativo para sobreviver a operações de limpeza (`fullclean`).
 
