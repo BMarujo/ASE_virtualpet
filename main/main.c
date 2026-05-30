@@ -132,6 +132,7 @@ pet_state_t pet_state = {
 SemaphoreHandle_t pet_state_mutex;
 QueueHandle_t button_evt_queue;
 adc_oneshot_unit_handle_t adc1_handle;
+TaskHandle_t telemetry_task_handle = NULL;
 
 static int clamp_int(int value, int min, int max) {
     if (value < min) return min;
@@ -648,7 +649,7 @@ void wifi_telemetry_task(void *pvParameters) {
                  expression_for_state(&snapshot));
         ESP_LOGI(TAG, "MQTT status: %s", payload);
         esp_mqtt_client_publish(client, "virtualpet/status", payload, 0, 1, 0);
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
     }
 }
 
@@ -758,7 +759,7 @@ void app_main(void) {
     xTaskCreate(display_task, "display_task", 8192, NULL, 4, NULL);
     
     wifi_init_sta();
-    xTaskCreate(wifi_telemetry_task, "wifi_telemetry_task", 8192, NULL, 4, NULL);
+    xTaskCreate(wifi_telemetry_task, "wifi_telemetry_task", 8192, NULL, 4, &telemetry_task_handle);
     
     ESP_LOGI(TAG, "Sistema Inicializado com sucesso!");
 }
