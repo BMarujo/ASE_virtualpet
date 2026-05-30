@@ -417,14 +417,16 @@ void pet_logic_task(void *pvParameters) {
         if (go_to_sleep) {
             ESP_LOGI(TAG, "Saude critica (<%d)! A entrar em Light Sleep...", HEALTH_SLEEP_THRESHOLD);
             
-            // Ligar o LED permanentemente durante o Light Sleep e reter o pino
+            // Ligar o LED permanentemente indicando transição para sleep
             gpio_set_level(LED_GPIO, 1);
             gpio_hold_en((gpio_num_t)LED_GPIO);
+            
+            // Pequeno atraso para a task do ecrã atualizar o Sprite para dormir (Zzz) ANTES de apagar a luz
+            vTaskDelay(pdMS_TO_TICKS(1100));
+
+            // Desligar o Ecrã e fixar o pino em baixo durante o sono profundo
             gpio_set_level(PIN_BL, 0);
             gpio_hold_en((gpio_num_t)PIN_BL);
-            
-            // Pequeno atraso para a task do ecrã atualizar o Sprite para dormir (Zzz)
-            vTaskDelay(pdMS_TO_TICKS(1100));
 
             // Configurar wakeup pelo Botão C (GPIO 4) para o Light Sleep
             gpio_wakeup_enable((gpio_num_t)BUTTON_C_GPIO, GPIO_INTR_LOW_LEVEL);
@@ -435,6 +437,9 @@ void pet_logic_task(void *pvParameters) {
 
             // --- ESP32 ACORDA AQUI ---
             ESP_LOGI(TAG, "Acordou do Light Sleep! (10s para alimentar antes de voltar a dormir)");
+            
+            // Limpar a fila de eventos de botões para ignorar ruído elétrico/glitches gerados ao adormecer ou acordar
+            xQueueReset(button_evt_queue);
             
             gpio_hold_dis((gpio_num_t)LED_GPIO); // Libertar a retenção do pino
             gpio_hold_dis((gpio_num_t)PIN_BL);
@@ -749,11 +754,11 @@ void app_main(void) {
     st7735_draw_string(10, 2, "Virtual Cat IoT", ST7735_YELLOW, ST7735_BLACK, 1);
 
     xTaskCreate(sensor_task, "sensor_task", 4096, (void*)&dht20Handle, 5, NULL);
-    xTaskCreate(pet_logic_task, "pet_logic_task", 4096, NULL, 5, NULL);
-    xTaskCreate(display_task, "display_task", 4096, NULL, 4, NULL);
+    xTaskCreate(pet_logic_task, "pet_logic_task", 8192, NULL, 5, NULL);
+    xTaskCreate(display_task, "display_task", 8192, NULL, 4, NULL);
     
     wifi_init_sta();
-    xTaskCreate(wifi_telemetry_task, "wifi_telemetry_task", 4096, NULL, 4, NULL);
+    xTaskCreate(wifi_telemetry_task, "wifi_telemetry_task", 8192, NULL, 4, NULL);
     
     ESP_LOGI(TAG, "Sistema Inicializado com sucesso!");
 }
